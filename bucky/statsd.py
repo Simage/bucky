@@ -4,7 +4,7 @@
 # use this file except in compliance with the License. You may obtain a copy of
 # the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -16,13 +16,18 @@
 
 import os
 import re
-import six
 import math
 import time
 import json
 import logging
 import threading
+
+import six
+
 import bucky.udpserver as udpserver
+from bucky.errors import ConfigError, ProtocolError
+import bucky.cfg as cfg
+
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +44,6 @@ except ImportError:
         """
         kwargs.pop("encoding")
         return _open(*args, **kwargs)
-
 
 if six.PY3:
     def read_json_file(gauges_filename):
@@ -235,120 +239,168 @@ class StatsDHandler(threading.Thread):
             ret += 1
         return ret
 
-    def handle(self, data):
-        # Adding a bit of extra sauce so clients can
-        # send multiple samples in a single UDP
-        # packet.
-        for line in data.splitlines():
-            self.line = line
-            if not line.strip():
-                continue
-            self.handle_line(line)
+    def handle(self, metric):
+        if metric.type == StatsDMetric.TIMER:
+            self.handle_timer(metric)
+        elif metric.type == StatsDMetric.GAUGE:
+            self.handle_gauge(metric)
+        elif metric.type == StatsDMetric.SET:
+            self.handle_set(metric)
+        elif metric.type == StatsDMetric.COUNTER:
+            self.handle_counter(metric)
+        else:
+            log.error('Unhandled metric type "%s"', metric.type)
 
-    def handle_line(self, line):
-        bits = line.split(":")
-        key = self.handle_key(bits.pop(0))
-
-        if not bits:
-            self.bad_line()
-            return
-
-        # I'm not sure if statsd is doing this on purpose
-        # but the code allows for name:v1|t1:v2|t2 etc etc.
-        # In the interest of compatibility, I'll maintain
-        # the behavior.
-        for sample in bits:
-            if "|" not in sample:
-                self.bad_line()
-                continue
-            fields = sample.split("|")
-            if fields[1] == "ms":
-                self.handle_timer(key, fields)
-            elif fields[1] == "g":
-                self.handle_gauge(key, fields)
-            elif fields[1] == "s":
-                self.handle_set(key, fields)
-            else:
-                self.handle_counter(key, fields)
-
-    def handle_key(self, key):
-        for (rexp, repl) in self.key_res:
-            key = rexp.sub(repl, key)
-        self.keys_seen.add(key)
-        return key
-
-    def handle_timer(self, key, fields):
+    def handle_timer(self, metric):
         try:
-            val = float(fields[0] or 0)
+            val = float(metric.value or 0)
             with self.lock:
-                self.timers.setdefault(key, []).append(val)
+                self.timers.setdefault(metric.name, []).append(metric.value)
         except:
-            self.bad_line()
+            self.bad_metric(metric)
 
-    def handle_gauge(self, key, fields):
-        valstr = fields[0] or "0"
+    def handle_gauge(self, metric):
         try:
-            val = float(valstr)
+            val = float(metric.value or 0)
+            with self.lock:
+                if metric.name in self.gauges and metric.sign is not None:
+                    self.gauges[metric.name] = self.gauges[metric.name] + metric.name
+                else:
+                    self.gauges[metric.name] = val
         except:
-            self.bad_line()
-            return
-        delta = valstr[0] in ["+", "-"]
-        with self.lock:
-            if delta and key in self.gauges:
-                self.gauges[key] = self.gauges[key] + val
-            else:
-                self.gauges[key] = val
+            self.bad_metric(metric)
 
-    def handle_set(self, key, fields):
-        valstr = fields[0] or "0"
-        with self.lock:
-            if key not in self.sets:
-                self.sets[key] = set()
-            self.sets[key].add(valstr)
+    def handle_set(self, metric):
+        try:
+            valstr = str(metric.value or "0")
+            with self.lock:
+                if metric.name not in self.sets:
+                    self.sets[metric.name] = set()
+                self.sets[metric.name].add(valstr)
+        except:
+            self.bad_metric(metric)
 
-    def handle_counter(self, key, fields):
-        rate = 1.0
-        if len(fields) > 2 and fields[2][:1] == "@":
+    def handle_counter(self, metric):
+        try:
+            with self.lock:
+                if metric.name not in self.counters:
+                    self.counters[metric.name] = 0
+                self.counters[metric.name] += int(float(metric.value or 0) / metric.rate)
+        except:
+            self.bad_metric(metric)
+
+    def bad_metric(self, metric, msg=None):
+        log.error("StatsD: Invalid metric: '%s'", metric)
+        if msg:
+            log.error(msg)
+
+    def close(self):
+        pass
+
+
+class StatsDMetric(object):
+    GAUGE = 'g'
+    COUNTER = 'c'
+    TIMER = 'ms'
+    HISTOGRAM = 'h'
+    METER = 'm'
+    SET = 's'
+
+    def __init__(self, name, value=1.0, metric_type=METER, rate=None):
+        self.name = name
+        if value[0] in ['-', '+']:
+            self.sign = value[0]
+        else:
+            self.sign = None
+        self.value = float(value)
+        assert (metric_type in [self.GAUGE, self.COUNTER, self.TIMER, self.HISTOGRAM, self.METER])
+        self.type = metric_type
+        if rate is not None:
             try:
-                rate = float(fields[2][1:].strip())
-            except:
-                rate = 1.0
-        try:
-            val = int(float(fields[0] or 0) / rate)
-        except:
-            self.bad_line()
-            return
-        with self.lock:
-            if key not in self.counters:
-                self.counters[key] = 0
-            self.counters[key] += val
+                if rate[0] == '@':
+                    rate = rate[1:]
+            except TypeError:
+                pass
+            self.rate = float(rate)
+        else:
+            self.rate = 1.0
 
-    def bad_line(self):
-        log.error("StatsD: Invalid line: '%s'", self.line.strip())
+
+class StatsDParser(object):
+    def __init__(self):
+        pass
+
+    def parse(self, data):
+        if six.PY3:
+            data = data.decode()
+        for line in data.splitlines():
+            name, data = line.split(':', 1)
+            for sample in data.split(':'):
+                args = sample.split('|')
+                metric = StatsDMetric(name, *args)
+                yield metric
 
 
 class StatsDServer(udpserver.UDPServer):
     def __init__(self, queue, cfg):
         super(StatsDServer, self).__init__(cfg.statsd_ip, cfg.statsd_port)
-        self.handler = StatsDHandler(queue, cfg)
+        self.parser = StatsDParser()
+        self.handlers = self._init_handlers(queue, cfg)
+        log.debug('Handlers: %r', self.handlers)
 
     def pre_shutdown(self):
-        self.handler.save_gauges()
+        for _, handler in self.handlers:
+            handler.save_gauges()
 
     def run(self):
-        self.handler.load_gauges()
-        self.handler.start()
+        log.debug('Starting Run Method')
         super(StatsDServer, self).run()
 
-    if six.PY3:
-        def handle(self, data, addr):
-            self.handler.handle(data.decode())
-            if not self.handler.is_alive():
-                return False
-            return True
-    else:
-        def handle(self, data, addr):
-            self.handler.handle(data)
-            if not self.handler.is_alive():
-                return False
-            return True
+    def handle(self, data, addr):
+        try:
+            for mc in self.parser.parse(data):
+                handler = self._get_handler(mc.name)
+                handler.handle(mc)
+        except ProtocolError:
+            log.exception("Error from: %s:%s" % addr)
+
+    def _init_handlers(self, queue, cfg):
+        ret = []
+        handlers = cfg.metricsd_handlers
+        if not len(handlers):
+            ret = [(None, StatsDHandler(queue, cfg))]
+            ret[0][1].start()
+            return ret
+        for item in handlers:
+            if len(item) == 2:
+                pattern, interval, priority = item[0], item[1], 100
+            elif len(item) == 3:
+                pattern, interval, priority = item
+            else:
+                raise ConfigError("Invalid handler specification: %s" % item)
+            try:
+                pattern = re.compile(pattern)
+            except:
+                raise ConfigError("Invalid pattern: %s" % pattern)
+            if interval < 0:
+                raise ConfigError("Invalid interval: %s" % interval)
+            ret.append((pattern, interval, priority))
+        handlers.sort(key=lambda p: p[2])
+        ret = [(p, StatsDHandler(queue, i)) for (p, i, _) in ret]
+        ret.append((None, StatsDHandler(queue, cfg)))
+        for _, h in ret:
+            h.start()
+        return ret
+
+    def _get_handler(self, name):
+        for (p, h) in self.handlers:
+            if p is None:
+                return h
+            if p.match(name):
+                return h
+
+    def close(self):
+        for _, handler in self.handlers:
+            handler.close()
+            handler.join(cfg.process_join_timeout)
+        super(StatsDServer, self).close()
