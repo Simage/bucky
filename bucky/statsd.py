@@ -21,23 +21,18 @@ import time
 import json
 import logging
 import threading
-import multiprocessing
 
 try:
     import queue
 except ImportError:
     import Queue as queue
-try:
-    from setproctitle import setproctitle
-except ImportError:
-    def setproctitle(title):
-        pass
+
 import six
 
 import bucky.udpserver as udpserver
 from bucky.errors import ConfigError, ProtocolError
 
-#log = multiprocessing.log_to_stderr(logging.DEBUG)
+# log = multiprocessing.log_to_stderr(logging.DEBUG)
 log = logging.getLogger(__name__)
 
 try:
@@ -182,7 +177,7 @@ class StatsDHandler(threading.Thread):
         log.debug(msg, time.time(), threading.current_thread().ident, loop_count, *args)
 
     def run(self):
-        setproctitle("bucky: %s" % self.__class__.__name__)
+        self.name = "bucky: %s" % self.__class__.__name__
         loop_count = 0
         while True:
             loop_count += 1
