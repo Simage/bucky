@@ -4,7 +4,7 @@
 # use this file except in compliance with the License. You may obtain a copy of
 # the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
@@ -14,11 +14,11 @@
 #
 # Copyright 2011 Cloudant, Inc.
 
-import t
 import os
+import time
 
+import t
 import bucky.statsd
-
 
 TIMEOUT = 3
 
@@ -128,17 +128,19 @@ def test_simple_persistent_gauges(q, s):
     if os.path.isfile(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile)):
         os.unlink(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile))
     try:
-        s.handler.handle_line("gorm:5|g")
-        assert s.handler.gauges["gorm"] == 5
-
-        s.handler.save_gauges()
-
-        s.handler.handle_line("gorm:1|g")
-        assert s.handler.gauges["gorm"] == 1
-
-        s.handler.load_gauges()
-        assert s.handler.gauges["gorm"] == 5
+        handler = s._get_handler('gorm')
+        s.send("gorm:5|g")
+        t.same_stat(None, "stats.gauges.gorm", 5, q.get(timeout=TIMEOUT))
+        t.same_stat(None, "stats.numStats", 1, q.get(timeout=TIMEOUT))
+        handler.save_gauges()
+        s.send("gorm:1|g")
+        t.same_stat(None, "stats.gauges.gorm", 1, q.get(timeout=TIMEOUT))
+        t.same_stat(None, "stats.numStats", 1, q.get(timeout=TIMEOUT))
+        handler.load_gauges()
+        t.same_stat(None, "stats.gauges.gorm", 5, q.get(timeout=TIMEOUT))
+        t.same_stat(None, "stats.numStats", 1, q.get(timeout=TIMEOUT))
     finally:
-        if os.path.isfile(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile)):
-            os.unlink(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile))
-        os.removedirs(t.cfg.directory)
+        pass
+        # if os.path.isfile(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile)):
+        # os.unlink(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile))
+        # os.removedirs(t.cfg.directory)
