@@ -347,7 +347,7 @@ class StatsDMetric(object):
     METER = 'm'
     SET = 's'
 
-    def __init__(self, name, value=1.0, metric_type=METER, rate=None):
+    def __init__(self, name, value=1.0, metric_type=METER, rate=1.0):
         self.name = name
         if value[0] in ['-', '+']:
             self.sign = value[0]
