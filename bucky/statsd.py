@@ -416,7 +416,7 @@ class StatsDServer(udpserver.UDPServer):
 
     @staticmethod
     def _init_handlers(inbox, config):
-        ret = []
+        ret = {}
         handlers = config.metricsd_handlers
         if not len(handlers):
             ret = [(None, StatsDHandler(inbox, config))]
@@ -435,17 +435,21 @@ class StatsDServer(udpserver.UDPServer):
                 raise ConfigError("Invalid pattern: %s" % pattern)
             if interval < 0:
                 raise ConfigError("Invalid interval: %s" % interval)
-            ret.append((pattern, interval, priority))
-        ret = [(p, StatsDHandler(inbox, i)) for (p, i, _) in ret]
+            patterns = ret.get(interval, [])
+            patterns.append(pattern)
+            ret[interval] = patterns
+        # ret.append((pattern, interval, priority))
+        ret = [(p, StatsDHandler(inbox, i)) for (i, p) in ret.items()]
         ret.append((None, StatsDHandler(inbox, config)))
         return ret
 
     def _get_handler(self, name):
-        for (p, h) in self.handlers:
-            if p is None:
+        for (patterns, h) in self.handlers:
+            if patterns is None:
                 return h
-            if p.match(name):
-                return h
+            for pattern in patterns:
+                if pattern.match(name):
+                    return h
 
     def close(self):
         super(StatsDServer, self).close()
