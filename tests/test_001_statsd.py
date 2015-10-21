@@ -144,3 +144,4 @@ def test_simple_persistent_gauges(q, s):
         # if os.path.isfile(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile)):
         # os.unlink(os.path.join(t.cfg.directory, t.cfg.statsd_gauges_savefile))
         # os.removedirs(t.cfg.directory)
+
